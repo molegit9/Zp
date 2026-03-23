@@ -57,9 +57,10 @@ else:
     print("Warning: GOOGLE_API_KEY or GEMINI_API_KEY not found in .env file.")
 
 class URLRequest(BaseModel):
-    url: str
-    is_spoofed: bool
-    # Python 3.9 에러 해결: 'str | None' 대신 Optional[str] 사용
+    url: Optional[str] = None
+    text: Optional[str] = None
+    action_type: Optional[str] = "hover"
+    is_spoofed: Optional[bool] = False
     target_brand: Optional[str] = None
 
 import httpx
@@ -104,6 +105,31 @@ async def get_domain_age_rdap(domain: str):
 @app.post("/api/v1/analyze")
 async def analyze_url(req: URLRequest):
     try:
+        # 0. 드래그(Drag) 텍스트 분석 모드 처리
+        if req.action_type == "drag" and req.text:
+            drag_prompt = f"""
+            당신은 보안 취약계층(어르신, 학생 등)을 돕는 눈높이 보안 전문가입니다.
+            사용자가 피싱이나 스미싱 사기로 의심되어 브라우저에서 드래그(하이라이트)한 문구입니다.
+            
+            [드래그된 텍스트 내용]
+            "{req.text}"
+            
+            이 문구 안에 악의성 링크 유도, 개인정보 탈취, 보이스피싱 결제 유도 등 위험한 문맥이 있는지 파악하여 안전도 점수(0~100)를 평가하세요. 100점은 '위협 없음(안전한 일반 텍스트)', 0점은 '심각한 사기/피싱 문구(위험)'입니다. 중학생도 이해할 수 있는 매우 쉬운 일상어로 1~2문장으로 판별 이유를 대답해야 합니다.
+            
+            반드시 아래 JSON 형식으로만 반환하세요:
+            {{"safety_score": 10, "reason": "택배 주소지 변경을 위장한 스미싱 사기 문자입니다. 절대 링크를 누르지 마세요!"}}
+            """
+            response = await client.aio.models.generate_content(
+                model='gemini-3.1-flash-lite-preview',
+                contents=drag_prompt,
+                config=types.GenerateContentConfig(response_mime_type="application/json")
+            )
+            return {"status": "success", "data": response.text}
+
+        # 이하 기존 호버(Hover) URL 분석 모드
+        if not req.url:
+            return {"status": "error", "message": "Hover action requires a valid URL."}
+            
         domain = req.url.split("//")[-1].split("/")[0]
         
         # 1. 캐시 최적화: 이전에 검사한 적 있는 URL인지 확인 (DB 조회)

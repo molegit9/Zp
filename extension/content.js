@@ -147,7 +147,59 @@ document.addEventListener('mouseout', (e) => {
     if (!link) return;
     
     clearTimeout(hoverTimer);
-    removeTooltip();
+    // 호버에서 마우스가 빠졌을 때, 드래그 상태가 아니면 툴팁을 지운다.
+    const selectedText = window.getSelection().toString().trim();
+    if (selectedText.length === 0) removeTooltip();
+});
+
+// 화면의 빈 공간을 클릭하면 툴팁 닫기
+document.addEventListener('mousedown', (e) => {
+    // 툴팁 위를 클릭한게 아닐 경우
+    if (!e.target.closest('.phishing-detector-tooltip')) {
+        setTimeout(() => {
+            const selectedText = window.getSelection().toString().trim();
+            if (selectedText.length === 0) removeTooltip();
+        }, 10);
+    }
+});
+
+// 드래그(텍스트 선택) 감지 로직
+document.addEventListener('mouseup', async (e) => {
+    if (e.target.closest('.phishing-detector-tooltip')) return;
+    
+    const selectedText = window.getSelection().toString().trim();
+    
+    // 10자 이상, 500자 이하의 텍스트를 드래그 했을 때만 의도로 파악하고 작동
+    if (selectedText.length >= 10 && selectedText.length <= 500) {
+        console.log(`[Phishing Detector] 텍스트 드래그 감지됨: "${selectedText}"`);
+        
+        try {
+            // 임시 툴팁 생성
+            showSafetyTooltip(e.pageX, e.pageY, 50, "드래그한 문맥의 악의성을 AI가 분석 중입니다... 🔄");
+            if(currentTooltip) currentTooltip.classList.remove('safe', 'danger', 'warning');
+            
+            const response = await fetch('http://localhost:8000/api/v1/analyze', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    action_type: "drag",
+                    text: selectedText
+                })
+            });
+            
+            if (!response.ok) throw new Error("서버 연동 에러");
+            
+            const result = await response.json();
+            if (result.status === 'success') {
+                const data = JSON.parse(result.data);
+                showSafetyTooltip(e.pageX, e.pageY, data.safety_score, data.reason);
+            } else {
+                console.error("[Phishing Detector] 드래그 에러:", result.message);
+            }
+        } catch (err) {
+            console.error('[Phishing Detector] 드래그 분석 API 연동 실패', err);
+        }
+    }
 });
 
 console.log("[Phishing Detector] 클라이언트 코드 로드 완료 및 감지 대기 중...");

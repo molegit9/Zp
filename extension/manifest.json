@@ -1,29 +1,20 @@
 {
-    "manifest_version": 3,
-    "name": "Safety Net: AI Security System",
-    "version": "1.0",
-    "description": "실시간 마우스 액션 기반 보안 위협 분석 확장 프로그램",
-    "permissions": [
-      "activeTab",
-      "scripting",
-      "storage"
-    ],
-    "host_permissions": [
-      "<all_urls>",
-      "http://localhost:8000/*"
-    ],
-    "action": {
-      "default_popup": "popup.html",
-      "default_title": "Safety Net DB 관리"
-    },
-    "background": {
-      "service_worker": "background.js"
-    },
-    "content_scripts": [
-      {
-        "matches": ["<all_urls>"],
-        "css": ["styles.css"],
-        "js": ["content.js"]
-      }
-    ]
-  }
+  "manifest_version": 3,
+  "name": "Zero-shot Phishing Detector",
+  "version": "1.0",
+  "description": "Hover to detect phishing instantly using Gemini 3.1 Flash Lite.",
+  "permissions": [
+    "activeTab",
+    "scripting"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "css": ["style.css"],
+      "js": ["content.js"]
+    }
+  ],
+  "host_permissions": [
+    "http://localhost:8000/*"
+  ]
+}

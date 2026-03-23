@@ -109,9 +109,18 @@ async def analyze_url(req: URLRequest):
         # 1. 캐시 최적화: 이전에 검사한 적 있는 URL인지 확인 (DB 조회)
         cached = get_cached_analysis(req.url)
         if cached:
-            # 과거 결과를 그대로 JSON 문자열로 감싸서 극초고속(0.01초) 반환
-            cache_json = f'{{"safety_score": {cached["status"]}, "reason": "{cached["reason"]}"}}'
-            return {"status": "success", "data": cache_json}
+            status_val = str(cached["status"])
+            # 과거 DB에 있던 "VT_SAFE", "WARNING" 등 문자열 데이터 하위 호환 처리
+            if not status_val.isdigit():
+                if "SAFE" in status_val: status_val = "100"
+                elif "WARNING" in status_val: status_val = "40"
+                elif "DANGER" in status_val: status_val = "10"
+                else: status_val = "50"
+            
+            # JSON 파싱 시 특수문자나 따옴표("") 충돌 방지를 위해 json.dumps 사용
+            import json
+            cache_data = {"safety_score": int(status_val), "reason": cached["reason"]}
+            return {"status": "success", "data": json.dumps(cache_data)}
         
         # 2. 외부 API 병렬 호출 (RDAP 도메인 나이 & VirusTotal 블랙리스트 동시 검사)
         domain_age_task = asyncio.create_task(get_domain_age_rdap(domain))

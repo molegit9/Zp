@@ -21,6 +21,13 @@ except ImportError:
 # 환경 변수 로드
 load_dotenv()
 
+# VirusTotal 모듈 임포트
+try:
+    from virustotal_service import check_url_virustotal
+except ImportError:
+    print("Warning: virustotal_service.py not found.")
+    async def check_url_virustotal(url): return None
+
 # 서버 실행/종료 시 DB 초기화를 진행하는 Lifespan 셋업
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -106,8 +113,18 @@ async def analyze_url(req: URLRequest):
             cache_json = f'{{"safety_score": {cached["status"]}, "reason": "{cached["reason"]}"}}'
             return {"status": "success", "data": cache_json}
         
-        # 2. 외부 API(RDAP) 비동기 호출 (캐시에 없을 때만 실행)
-        domain_age = await get_domain_age_rdap(domain)
+        # 2. 외부 API 병렬 호출 (RDAP 도메인 나이 & VirusTotal 블랙리스트 동시 검사)
+        domain_age_task = asyncio.create_task(get_domain_age_rdap(domain))
+        vt_task = asyncio.create_task(check_url_virustotal(req.url))
+        
+        domain_age, vt_result = await asyncio.gather(domain_age_task, vt_task)
+        
+        vt_info = "미확인 (기록 없거나 대기열 초과)"
+        if vt_result:
+            if vt_result.get("status") == "VT_DANGER":
+                vt_info = "위험 (기존 보안 엔진 블랙리스트에 이미 감지된 악성 도메인!)"
+            else:
+                vt_info = "안전 (전문 보안 엔진 블랙리스트에 없음)"
         
         # 3. Gemini 프롬프트 구성 (대상자 맞춤형 및 안전도 점수 기준 명확화)
         target_str = req.target_brand if req.target_brand else "없음"
@@ -121,6 +138,7 @@ async def analyze_url(req: URLRequest):
         [사전 분석 메타데이터]
         - Levenshtein 타이포스쿼팅 탐지: {req.is_spoofed} (사칭 타겟: {target_str})
         - 도메인 나이(RDAP): {domain_age}
+        - VirusTotal 보안 DB 감지 여부: {vt_info}
         
         위 메타데이터와 시스템 컨텍스트를 파악하여, 이 사이트의 안전도 점수(0~100)를 평가하세요.
         100점은 '공식 사이트이며 완전히 안전함'을 뜻하고, 0점은 '심각한 사기/피싱 환경'을 의미합니다.

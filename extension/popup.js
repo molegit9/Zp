@@ -1,31 +1,29 @@
-document.addEventListener('DOMContentLoaded', () => {
-    const clearBtn = document.getElementById('clearBtn');
-    const statusEl = document.getElementById('status');
-
-    clearBtn.addEventListener('click', async () => {
-        statusEl.textContent = "초기화 중...";
-        statusEl.style.color = "#888";
+document.getElementById('clearBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('clearBtn');
+    const msg = document.getElementById('statusMsg');
+    
+    btn.disabled = true;
+    btn.innerText = "서버 통신 중...";
+    
+    try {
+        const response = await fetch('http://localhost:8000/api/clear-db', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'}
+        });
         
-        try {
-            const response = await fetch("http://localhost:8000/api/clear-db", {
-                method: "POST"
-            });
-            
-            if (response.ok) {
-                statusEl.textContent = "✅ DB 초기화 완료!";
-                statusEl.style.color = "#34c759";  // Apple green
-            } else {
-                statusEl.textContent = "❌ 초기화 실패 (서버 에러)";
-                statusEl.style.color = "#ff3b30";
-            }
-        } catch (err) {
-            statusEl.textContent = "❌ 초기화 실패 (서버 꺼짐)";
-            statusEl.style.color = "#ff3b30";
+        if (response.ok) {
+            btn.style.display = 'none';
+            msg.style.display = 'block';
+            // 1.5초 뒤 창 자동 닫기
+            setTimeout(() => { window.close(); }, 1500); 
+        } else {
+            alert('서버 에러가 발생했습니다. 백엔드 동작 여부를 확인하세요.');
+            btn.disabled = false;
+            btn.innerText = "데이터베이스(DB) 초기화";
         }
-        
-        // 메시지를 3초 뒤에 삭제합니다
-        setTimeout(() => {
-            statusEl.textContent = "";
-        }, 3000);
-    });
+    } catch (e) {
+        alert('백엔드 서버(uvicorn)에 연결할 수 없습니다. 서버가 켜져있는지 확인하세요.');
+        btn.disabled = false;
+        btn.innerText = "데이터베이스(DB) 초기화";
+    }
 });

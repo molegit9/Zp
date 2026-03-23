@@ -1,0 +1,16 @@
+# Python 관련
+__pycache__/
+*.py[cod]
+.venv/
+.env
+
+# DB 및 로그 관련 (개인 데이터는 올리지 않음)
+*.db
+*.log
+
+# Redis 관련
+dump.rdb
+
+# OS 관련
+.DS_Store
+Thumbs.db

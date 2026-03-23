@@ -80,6 +80,47 @@
         <p>설명: 마치 apple.com 에 접속하는 것처럼 보이지만, 실제 이 사이트의 소유주 도메인은 뒤쪽의 [secure-verify-auth.net] 입니다. 매우 위협적인 사기수법입니다.</p>
     </div>
 
+    <!-- 4. 교묘하게 텍스트나 버튼에 숨겨진 악성 링크 (Hover 테스트) -->
+    <div class="card phish">
+        <h3>7. 하이퍼링크 위장 (글씨/버튼에 숨기기) <span class="badge phish">접속금지 0~40점 기대</span></h3>
+        <p>정상적인 글이나 버튼처럼 보이지만, 마우스를 올려보면 숨겨진 <strong>악성 목적지</strong>가 들통납니다.</p>
+        <div style="margin-top: 15px; background: #fff; padding: 15px; border-radius: 8px; border: 1px solid #e2e8f0;">
+            <p style="margin-top: 0; color: #333; font-size: 15px;">[국민건강보험] 고객님의 미환급 진료비 34,500원이 오늘 소멸될 예정입니다. <br>
+            👉 <a href="https://nhis.pay-refund-auth.com/login" style="color: #2563eb; text-decoration: underline; font-weight: bold;">환급금 즉시 조회하기</a></p>
+            <br>
+            <a href="https://www.g00gle.com/secure-login" style="display: inline-block; background: #03c75a; color: white; padding: 10px 20px; border-radius: 6px; text-decoration: none; font-size: 14px; font-weight: bold;">[안전] 네이버 간편 로그인</a>
+        </div>
+        <p>설명: 초록색 버튼이나 "환급금 조회"라는 정상적인 문구에 속기 쉽지만, 확장 프로그램이 백그라운드의 진짜 주소(`g00gle.com`, `pay-refund-auth.com`)를 먼저 스캔하여 경고를 띄워줍니다.</p>
+    </div>
+
+    <!-- 5. 텍스트 드래그(Drag) 스미싱 테스트 -->
+    <h2 style="margin-top: 50px; margin-bottom: 20px; font-size: 22px; color: #0f172a; border-bottom: 2px solid #e2e8f0; padding-bottom: 10px;">드래그(Drag) 텍스트 분석 테스트 ✍️</h2>
+    <p class="desc" style="text-align: left; margin-bottom: 20px;">아래의 회색 상자 안의 텍스트를 마우스로 길게 <strong>드래그(블록 지정)</strong> 해보세요! AI가 문맥을 곧바로 분석합니다.</p>
+
+    <div class="card typo" style="background: #f8fafc; cursor: text;">
+        <h3>[테스트 A] 전형적인 스미싱(SMS) 문자 <span class="badge typo">위험/주의 10~30점 기대</span></h3>
+        <div style="padding: 15px; line-height: 1.6; color: #334155; font-size: 15px; user-select: text;">
+            [Web발신]<br>
+            [우체국택배] 수취인 부재로 수화물이 반송되었습니다. 배송 주소지를 다시 확인해주시기 바랍니다.<br>
+            확인: http://koreapost.delivery-kr.net/track
+        </div>
+    </div>
+
+    <div class="card phish" style="background: #f8fafc; cursor: text;">
+        <h3>[테스트 B] 악성 이메일 협박 (Sextortion) <span class="badge phish">위험 0~20점 기대</span></h3>
+        <div style="padding: 15px; line-height: 1.6; color: #334155; font-size: 15px; user-select: text;">
+            제목: 당신의 컴퓨터가 해킹되었습니다 (긴급)<br><br>
+            나는 해커이며, 당신의 노트북 웹캠을 통해 당신의 부끄러운 사생활 영상을 모두 녹화했다. 이 영상이 당신의 가족과 직장 동료들에게 유포되는 것을 막으려면 48시간 이내에 내 비트코인 지갑으로 $1,000를 보내라. 이것은 마지막 경고다.
+        </div>
+    </div>
+    
+    <div class="card safe" style="background: #f8fafc; cursor: text;">
+        <h3>[테스트 C] 평범한 일상 대화 <span class="badge safe">안전 90~100점 기대</span></h3>
+        <div style="padding: 15px; line-height: 1.6; color: #334155; font-size: 15px; user-select: text;">
+            엄마 나 휴대폰 액정 깨져서 수리 맡겼어. ㅠㅠ 지금 피시방인데 이따가 집 갈 때 두부 좀 사갈까? 찌개 끓여먹고싶당ㅎㅎ 영수증은 모바일로 받을게!
+        </div>
+    </div>
+
 </div>
 
 </body>

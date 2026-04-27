@@ -309,7 +309,10 @@ async def analyze_rag_text(req: TextAnalyzeRequest):
             return {"risk_level": "에러", "score": 0, "reason": "AI 파싱 오류", "mitigation": "-"}
             
     except Exception as e:
-        return {"risk_level": "시스템 오류", "score": 0, "reason": f"RAG 에러: {str(e)}", "mitigation": "관리자 문의"}
+        error_msg = str(e)
+        if "503" in error_msg or "UNAVAILABLE" in error_msg:
+            return {"risk_level": "분석 지연", "score": 50, "reason": "현 시각 구글(Gemini) 본사 AI 서버 트래픽 폭주로 일시적 응답 불량(503)이 발생했습니다.", "mitigation": "구글 서버 지연 현상입니다. 1~2분 뒤 다시 드래그해 보세요."}
+        return {"risk_level": "시스템 오류", "score": 50, "reason": f"RAG 에러 발생: {error_msg}", "mitigation": "관리자 문의"}
 
 if __name__ == "__main__":
     import uvicorn

@@ -135,31 +135,6 @@ async def get_domain_age_rdap(domain: str):
 @app.post("/api/v1/analyze")
 async def analyze_url(req: URLRequest):
     try:
-        # 0. 드래그(Drag) 텍스트 분석 모드 처리
-        if req.action_type == "drag" and req.text:
-            drag_prompt = f"""
-            당신은 보안 취약계층(어르신, 학생 등)을 돕는 눈높이 보안 전문가입니다.
-            사용자가 피싱이나 스미싱 사기로 의심되어 브라우저에서 드래그(하이라이트)한 문구입니다.
-            
-            [드래그된 텍스트 내용]
-            "{req.text}"
-            
-            이 문구가 실제 피싱 사기인지 판단하여 안전도 점수(0~100)를 평가하세요. 100점은 '위협 없음(일상 대화)', 0점은 '심각한 사기/피싱 문구(위험)'입니다.
-            **중요 판단 기준 (오탐 방지):**
-            "엄마 나 휴대폰 액정 깨졌어" 같이 피싱범들이 자주 쓰는 소재가 등장하더라도, '링크 접속 유도', '엄마 폰으로 구글 기프트카드 사줘', '계좌로 돈 보내줘', '신분증 사진 찍어보내' 같은 **직접적이고 구체적인 악의적 요구(금전/정보 탈취)**가 없다면 이는 가족 간의 평범한 일상 대화일 확률이 매우 높으므로 무조건 90~100점(안전)을 줘야 합니다. 불필요하게 겁주지 마세요.
-            
-            중학생도 이해할 수 있는 매우 쉬운 일상어로 1~2문장으로 판별 이유를 대답해야 합니다.
-            
-            반드시 아래 JSON 형식으로만 반환하세요:
-            {{"safety_score": 100, "reason": "금전을 요구하거나 수상한 링크가 없으므로 평범한 가족 간의 대화로 보입니다. 안심하세요!"}}
-            """
-            response = await client.aio.models.generate_content(
-                model='gemini-3.1-flash-lite-preview',
-                contents=drag_prompt,
-                config=types.GenerateContentConfig(response_mime_type="application/json")
-            )
-            return {"status": "success", "data": response.text}
-
         # 이하 기존 호버(Hover) URL 분석 모드
         if not req.url:
             return {"status": "error", "message": "Hover action requires a valid URL."}
@@ -197,6 +172,7 @@ async def analyze_url(req: URLRequest):
         
         # 3. Gemini 프롬프트 구성 (대상자 맞춤형 및 안전도 점수 기준 명확화)
         target_str = req.target_brand if req.target_brand else "없음"
+        is_https = "사용 중 (안전함)" if str(req.url).startswith("https://") else "미사용 - HTTP 기반의 암호화되지 않은 취약한 연결 (개인정보 탈취 위험 높음!)"
         
         prompt = f"""
         당신은 보안 취약계층(어르신, 학생 등)을 돕는 친절한 화이트해커 전문가입니다.
@@ -205,6 +181,7 @@ async def analyze_url(req: URLRequest):
         대상 URL: {req.url}
         
         [사전 분석 메타데이터]
+        - HTTPS 통신 보안 프로토콜 사용 여부: {is_https}
         - Levenshtein 타이포스쿼팅 탐지: {req.is_spoofed} (사칭 타겟: {target_str})
         - 도메인 나이(RDAP): {domain_age}
         - VirusTotal 보안 DB 감지 여부: {vt_info}
@@ -264,9 +241,9 @@ async def analyze_rag_text(req: TextAnalyzeRequest):
                 distances = results.get("distances", [[999]])[0]
 
                 # --- 🚀 [성능 최적화: LLM 고속 처리 우회 (Vector Cache Hit)] ---
-                # 만약 드래그한 문구 벡터가 데이터셋의 문구와 100% 완벽하게 똑같다면 (거리 차이 0.02 미만)
+                # 만약 드래그한 문구 벡터가 데이터셋의 문구와 사실상 완벽하게 똑같다면 (거리 차이 0.15 미만)
                 # 느린 LLM(Gemini)에 물어볼 필요 없이 곧바로 데이터셋의 라벨을 토대로 빛의 속도로 초고속 반환합니다.
-                if len(distances) > 0 and distances[0] < 0.02:
+                if len(distances) > 0 and distances[0] < 0.15:
                     best_label = str(metas[0].get("label", "0"))
                     if best_label == "2":
                         return {"risk_level": "위험", "score": 95, "reason": "보안 데이터베이스의 악성 피싱 판례와 100% 일치하여, AI 딥러닝을 거치지 않고 초고속(0.01초)으로 차단했습니다.", "mitigation": "절대로 링크를 클릭하지 마세요."}

@@ -178,23 +178,24 @@ document.addEventListener('mouseup', async (e) => {
             showSafetyTooltip(e.pageX, e.pageY, 50, "드래그한 문맥의 악의성을 AI가 분석 중입니다... 🔄");
             if(currentTooltip) currentTooltip.classList.remove('safe', 'danger', 'warning');
             
-            const response = await fetch('http://localhost:8000/api/v1/analyze', {
+            const response = await fetch('http://localhost:8000/api/v1/analyze/text', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({
-                    action_type: "drag",
-                    text: selectedText
+                    selected_text: selectedText
                 })
             });
             
             if (!response.ok) throw new Error("서버 연동 에러");
             
+            // RAG 서버는 { risk_level, score, reason, mitigation } 포맷을 반환 (스코어 100점이 위험)
             const result = await response.json();
-            if (result.status === 'success') {
-                const data = JSON.parse(result.data);
-                showSafetyTooltip(e.pageX, e.pageY, data.safety_score, data.reason);
+            if (result && result.score !== undefined) {
+                // UI는 100점이 '안전'이므로 점수를 뒤집어서 전달 (100 - score)
+                const safetyScore = 100 - result.score;
+                showSafetyTooltip(e.pageX, e.pageY, safetyScore, result.reason + "<br>🛡️ 제안: " + (result.mitigation || ""));
             } else {
-                console.error("[Phishing Detector] 드래그 에러:", result.message);
+                console.error("[Phishing Detector] 드래그 에러:", result);
             }
         } catch (err) {
             console.error('[Phishing Detector] 드래그 분석 API 연동 실패', err);

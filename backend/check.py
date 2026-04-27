@@ -239,6 +239,9 @@ async def analyze_rag_text(req: TextAnalyzeRequest):
                 docs = results["documents"][0]
                 metas = results["metadatas"][0]
                 distances = results.get("distances", [[999]])[0]
+                
+                if len(distances) > 0:
+                    print(f"[RAG] Vector Distance (Cache Hit Check): {distances[0]}")
 
                 # --- 🚀 [성능 최적화: LLM 고속 처리 우회 (Vector Cache Hit)] ---
                 # 만약 드래그한 문구 벡터가 데이터셋의 문구와 사실상 완벽하게 똑같다면 (거리 차이 0.15 미만)
@@ -287,7 +290,15 @@ async def analyze_rag_text(req: TextAnalyzeRequest):
         response = await client.aio.models.generate_content(
             model='gemini-3.1-flash-lite-preview',
             contents=rag_prompt,
-            config=types.GenerateContentConfig(response_mime_type="application/json")
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                safety_settings=[
+                    types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+                    types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HARASSMENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+                    types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+                    types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+                ]
+            )
         )
         
         import json

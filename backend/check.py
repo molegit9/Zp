@@ -28,12 +28,37 @@ except ImportError:
     print("Warning: virustotal_service.py not found.")
     async def check_url_virustotal(url): return None
 
+# ChromaDB 모듈 호환성 임포트
+try:
+    import chromadb
+    from chromadb.utils import embedding_functions
+    HAS_CHROMA = True
+except ImportError:
+    HAS_CHROMA = False
+
+chroma_client = None
+rag_collection = None
+
 # 서버 실행/종료 시 DB 초기화를 진행하는 Lifespan 셋업
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global chroma_client, rag_collection
     # Startup phase
     init_db()
-    print("Database initialized successfully.")
+    print("SQLite initialized successfully.")
+    
+    # RAG DB 자동 로드
+    if HAS_CHROMA and os.path.exists("./chroma_db"):
+        try:
+            chroma_client = chromadb.PersistentClient(path="./chroma_db")
+            emb_fn = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="jhgan/ko-sroberta-multitask")
+            rag_collection = chroma_client.get_collection(name="security_texts", embedding_function=emb_fn)
+            print(f"RAG Vector DB loaded securely. Documents inside: {rag_collection.count()}")
+        except Exception as e:
+            print("RAG Vector DB load failed. Run rag_initializer.py manually.", e)
+    else:
+        print("Warning: Vector DB folder not found. RAG functionality will run without local context.")
+
     yield
     # Shutdown phase
 
@@ -62,6 +87,9 @@ class URLRequest(BaseModel):
     action_type: Optional[str] = "hover"
     is_spoofed: Optional[bool] = False
     target_brand: Optional[str] = None
+
+class TextAnalyzeRequest(BaseModel):
+    selected_text: str
 
 import httpx
 from datetime import datetime
@@ -218,6 +246,65 @@ async def clear_db():
         return {"status": "success", "message": "Database cleared safely."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# 신규 RAG 연동 전용 드래그 텍스트 분석 엔드포인트
+@app.post("/api/v1/analyze/text")
+async def analyze_rag_text(req: TextAnalyzeRequest):
+    try:
+        # 1. RAG Context Retrieval (벡터 조회)
+        retrieved_context = ""
+        if rag_collection:
+            results = rag_collection.query(query_texts=[req.selected_text], n_results=3)
+            
+            if results and "documents" in results and results["documents"]:
+                docs = results["documents"][0]
+                metas = results["metadatas"][0]
+                context_pieces = []
+                for i, doc in enumerate(docs):
+                    label = metas[i].get("label", "unknown")
+                    source = metas[i].get("source", "unknown")
+                    context_pieces.append(f"[사례 {i+1} : 과거 라벨 {label} ({source})]\n> 내용: {doc}")
+                retrieved_context = "\n\n".join(context_pieces)
+        else:
+            retrieved_context = "(로컬 Vector DB가 오프라인입니다. 자체 지식망으로 판단하세요.)"
+
+        # 2. Gemini RAG Prompt Design
+        rag_prompt = f"""
+        당신은 개인용 보안 시스템의 코어 엔진 역할을 하는 RAG(검색 증강 생성) 기반 위협 분석 AI입니다.
+        사용자가 웹에서 의심스러워 드래그한 텍스트에 스미싱, 피싱, 악성 메일 유도 등 사회공학적 사기 의도가 있는지 분석하세요.
+
+        **[분석 대상 텍스트]**
+        "{req.selected_text}"
+
+        **[RAG 지식베이스 검색 결과: 유사 과거 판례 3건]**
+        {retrieved_context}
+        
+        (※ 참고: 판례 Label 디코딩: 1=일상대화/안전, 2=스미싱/피싱, 3=정상정보, 4=스팸 메일, 5=악성 바이러스 메일)
+
+        위의 RAG 판례 기록과 텍스트 문맥을 교차 대조하여, 대상 텍스트의 실질적 위협도를 종합 분석하세요.
+        분석 결과는 **0~100점**의 score로 표기해야 합니다.
+        - 점수 등급: 0~30점(안전), 31~70점(주의), 71~100점(위험)
+        
+        반드시 지정된 아래 JSON Schema(Pydantic 대응) 형식으로만 응답하세요:
+        {{"risk_level": "위험", "score": 95, "reason": "이 텍스트는 RAG 데이터베이스의 Label 2 판례와 문맥이 99% 일치하는 악성 택배 스미싱 수법입니다.", "mitigation": "절대로 링크를 클릭하지 말고 해당 발신자를 즉시 차단하세요."}}
+        """
+
+        # 3. Requesting JSON bounded structure directly from LLM
+        response = await client.aio.models.generate_content(
+            model='gemini-3.1-flash-lite-preview',
+            contents=rag_prompt,
+            config=types.GenerateContentConfig(response_mime_type="application/json")
+        )
+        
+        import json
+        try:
+            res_data = json.loads(response.text)
+            return res_data
+        except json.JSONDecodeError:
+            return {"risk_level": "에러", "score": 0, "reason": "AI 파싱 오류", "mitigation": "-"}
+            
+    except Exception as e:
+        return {"risk_level": "시스템 오류", "score": 0, "reason": f"RAG 에러: {str(e)}", "mitigation": "관리자 문의"}
 
 if __name__ == "__main__":
     import uvicorn

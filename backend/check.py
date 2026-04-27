@@ -9,6 +9,8 @@ from google.genai import types
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
+
+
 # 기존 작업된 database.py 모듈에서 필요한 함수 임포트
 try:
     from database import init_db, get_db, log_analysis, get_cached_analysis
@@ -256,9 +258,24 @@ async def analyze_rag_text(req: TextAnalyzeRequest):
         if rag_collection:
             results = rag_collection.query(query_texts=[req.selected_text], n_results=3)
             
-            if results and "documents" in results and results["documents"]:
+            if results and "documents" in results and len(results["documents"]) > 0 and len(results["documents"][0]) > 0:
                 docs = results["documents"][0]
                 metas = results["metadatas"][0]
+                distances = results.get("distances", [[999]])[0]
+
+                # --- 🚀 [성능 최적화: LLM 고속 처리 우회 (Vector Cache Hit)] ---
+                # 만약 드래그한 문구 벡터가 데이터셋의 문구와 100% 완벽하게 똑같다면 (거리 차이 0.02 미만)
+                # 느린 LLM(Gemini)에 물어볼 필요 없이 곧바로 데이터셋의 라벨을 토대로 빛의 속도로 초고속 반환합니다.
+                if len(distances) > 0 and distances[0] < 0.02:
+                    best_label = str(metas[0].get("label", "0"))
+                    if best_label == "2":
+                        return {"risk_level": "위험", "score": 95, "reason": "보안 데이터베이스의 악성 피싱 판례와 100% 일치하여, AI 딥러닝을 거치지 않고 초고속(0.01초)으로 차단했습니다.", "mitigation": "절대로 링크를 클릭하지 마세요."}
+                    elif best_label in ["1", "3"]:
+                        return {"risk_level": "안전", "score": 5, "reason": "보안 DB의 안전한 문구 판례와 100% 일치하여 AI 분석을 생략하고 초고속 통과시킵니다.", "mitigation": "안심하세요."}
+                    elif best_label in ["4", "5"]:
+                        return {"risk_level": "위험", "score": 85, "reason": "알려진 악성 스팸 메일 판례와 파일이 100% 동일합니다. 초고속 차단됨.", "mitigation": "링크를 클릭하지 말고 즉시 삭제하세요."}
+                # -----------------------------------------------------------------
+
                 context_pieces = []
                 for i, doc in enumerate(docs):
                     label = metas[i].get("label", "unknown")

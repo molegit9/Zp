@@ -1,3 +1,23 @@
+document.addEventListener('DOMContentLoaded', () => {
+    const toggle = document.getElementById('progressToggle');
+    
+    // Load saved state
+    if (typeof chrome !== 'undefined' && chrome.storage) {
+        chrome.storage.local.get(['showProgress'], function(result) {
+            if (result.showProgress !== undefined) {
+                toggle.checked = result.showProgress;
+            } else {
+                toggle.checked = true; // default
+            }
+        });
+        
+        // Save state on change
+        toggle.addEventListener('change', (e) => {
+            chrome.storage.local.set({ showProgress: e.target.checked });
+        });
+    }
+});
+
 document.getElementById('clearBtn').addEventListener('click', async () => {
     const btn = document.getElementById('clearBtn');
     const msg = document.getElementById('statusMsg');

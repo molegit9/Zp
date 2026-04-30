@@ -3,6 +3,7 @@ import os
 from contextlib import asynccontextmanager
 from typing import Optional
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from google import genai
 from google.genai import types
@@ -81,7 +82,7 @@ client = None
 if api_key:
     client = genai.Client(api_key=api_key)
 else:
-    print("Warning: GOOGLE_API_KEY or GEMINI_API_KEY not found in .env file.")
+    print("Warning: GOOGLE_API_KEY or GEMINI_API_KEY is not set in the environment.")
 
 class URLRequest(BaseModel):
     url: Optional[str] = None
@@ -89,6 +90,7 @@ class URLRequest(BaseModel):
     action_type: Optional[str] = "hover"
     is_spoofed: Optional[bool] = False
     target_brand: Optional[str] = None
+    is_exact_match: Optional[bool] = False
 
 class TextAnalyzeRequest(BaseModel):
     selected_text: str
@@ -134,87 +136,122 @@ async def get_domain_age_rdap(domain: str):
 
 @app.post("/api/v1/analyze")
 async def analyze_url(req: URLRequest):
-    try:
-        # 이하 기존 호버(Hover) URL 분석 모드
-        if not req.url:
-            return {"status": "error", "message": "Hover action requires a valid URL."}
-            
-        domain = req.url.split("//")[-1].split("/")[0]
-        
-        # 1. 캐시 최적화: 이전에 검사한 적 있는 URL인지 확인 (DB 조회)
-        cached = get_cached_analysis(req.url)
-        if cached:
-            status_val = str(cached["status"])
-            # 과거 DB에 있던 "VT_SAFE", "WARNING" 등 문자열 데이터 하위 호환 처리
-            if not status_val.isdigit():
-                if "SAFE" in status_val: status_val = "100"
-                elif "WARNING" in status_val: status_val = "40"
-                elif "DANGER" in status_val: status_val = "10"
-                else: status_val = "50"
-            
-            # JSON 파싱 시 특수문자나 따옴표("") 충돌 방지를 위해 json.dumps 사용
-            import json
-            cache_data = {"safety_score": int(status_val), "reason": cached["reason"]}
-            return {"status": "success", "data": json.dumps(cache_data)}
-        
-        # 2. 외부 API 병렬 호출 (RDAP 도메인 나이 & VirusTotal 블랙리스트 동시 검사)
-        domain_age_task = asyncio.create_task(get_domain_age_rdap(domain))
-        vt_task = asyncio.create_task(check_url_virustotal(req.url))
-        
-        domain_age, vt_result = await asyncio.gather(domain_age_task, vt_task)
-        
-        vt_info = "미확인 (기록 없거나 대기열 초과)"
-        if vt_result:
-            if vt_result.get("status") == "VT_DANGER":
-                vt_info = "위험 (기존 보안 엔진 블랙리스트에 이미 감지된 악성 도메인!)"
-            else:
-                vt_info = "안전 (전문 보안 엔진 블랙리스트에 없음)"
-        
-        # 3. Gemini 프롬프트 구성 (대상자 맞춤형 및 안전도 점수 기준 명확화)
-        target_str = req.target_brand if req.target_brand else "없음"
-        is_https = "사용 중 (안전함)" if str(req.url).startswith("https://") else "미사용 - HTTP 기반의 암호화되지 않은 취약한 연결 (개인정보 탈취 위험 높음!)"
-        
-        prompt = f"""
-        당신은 보안 취약계층(어르신, 학생 등)을 돕는 친절한 화이트해커 전문가입니다.
-        '인증서 만료', 'XSS' 같은 어려운 기술 용어는 절대 쓰지 말고, 중학생도 이해할 수 있는 쉬운 비유와 일상어로 1~2문장으로 대답해야 합니다.
-        
-        대상 URL: {req.url}
-        
-        [사전 분석 메타데이터]
-        - HTTPS 통신 보안 프로토콜 사용 여부: {is_https}
-        - Levenshtein 타이포스쿼팅 탐지: {req.is_spoofed} (사칭 타겟: {target_str})
-        - 도메인 나이(RDAP): {domain_age}
-        - VirusTotal 보안 DB 감지 여부: {vt_info}
-        
-        위 메타데이터와 시스템 컨텍스트를 파악하여, 이 사이트의 안전도 점수(0~100)를 평가하세요.
-        100점은 '공식 사이트이며 완전히 안전함'을 뜻하고, 0점은 '심각한 사기/피싱 환경'을 의미합니다.
-        
-        응답은 반드시 아래 JSON 형식으로만 반환하세요:
-        {{"safety_score": 90, "reason": "이곳은 아이폰 공식 홈페이지입니다. 안심하고 쓰셔도 좋습니다."}}
-        """
-        
-        # 4. 모델 호출 (최신 google-genai 비동기 방식 및 정확한 모델명 복구)
-        response = await client.aio.models.generate_content(
-            model='gemini-3.1-flash-lite-preview',
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-            )
-        )
-        
-        # 5. DB에 결과 저장 (다음 번 호버링 속도 최적화를 위해)
-        import json
+    async def event_generator():
         try:
-            res_data = json.loads(response.text)
-            log_score = str(res_data.get("safety_score", 50))
-            log_reason = res_data.get("reason", "")
-            log_analysis("hover", req.url, log_score, log_reason)
-        except Exception as db_e:
-            print("DB 로그 저장 에러:", db_e)
+            # 이하 기존 호버(Hover) URL 분석 모드
+            if not req.url:
+                yield json.dumps({"status": "error", "message": "Hover action requires a valid URL."}) + "\n"
+                return
+                
+            domain = req.url.split("//")[-1].split("/")[0]
+
+            # 백엔드 단독으로 도메인 파싱 후 판단 (익스텐션 새로고침 무관하게 동작하도록 보장)
+            parts = domain.split('.')
+            base_domain = domain
+            if len(parts) > 2:
+                base_domain = f"{parts[-2]}.{parts[-1]}"
+            top_brands = ["apple.com", "naver.com", "google.com", "amazon.com", "github.com", "facebook.com", "netflix.com"]
+
+            # 0. [Fast Pipeline] 문자열 필터링으로 최상위 브랜드(구글, 네이버 등) 완벽 일치 시 즉시 반환 (디비 조회/LLM 모두 생략)
+            is_backend_exact_match = base_domain in top_brands
+            brand_name = base_domain if is_backend_exact_match else req.target_brand
             
-        return {"status": "success", "data": response.text}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+            if is_backend_exact_match or (req.is_exact_match and req.target_brand):
+                early_data = json.dumps({"safety_score": 100, "reason": f"[{brand_name}] 공식 홈페이지입니다. 안전하게 이용하세요. (로컬 검증 완료)"})
+                # DB 캐시에 빠른 인증 결과 저장
+                log_analysis("hover", req.url, "100", f"[{brand_name}] 공식 도메인 즉시 인증")
+                yield json.dumps({"status": "success", "data": early_data}) + "\n"
+                return
+            
+            # 1. 캐시 최적화: 이전에 검사한 적 있는 URL인지 확인 (DB 조회)
+            cached = get_cached_analysis(req.url)
+            if cached:
+                status_val = str(cached["status"])
+                # 과거 DB에 있던 "VT_SAFE", "WARNING" 등 문자열 데이터 하위 호환 처리
+                if not status_val.isdigit():
+                    if "SAFE" in status_val: status_val = "100"
+                    elif "WARNING" in status_val: status_val = "40"
+                    elif "DANGER" in status_val: status_val = "10"
+                    else: status_val = "50"
+                
+                # JSON 파싱 시 특수문자나 따옴표("") 충돌 방지를 위해 json.dumps 사용
+                cache_data = {"safety_score": int(status_val), "reason": cached["reason"]}
+                yield json.dumps({"status": "success", "data": json.dumps(cache_data)}) + "\n"
+                return
+            
+            yield json.dumps({"progress": "바이러스토탈 및 도메인 정보 검색 중... 🔍"}) + "\n"
+            
+            # 2. 외부 API 병렬 호출 (RDAP 도메인 나이 & VirusTotal 블랙리스트 동시 검사)
+            domain_age_task = asyncio.create_task(get_domain_age_rdap(domain))
+            vt_task = asyncio.create_task(check_url_virustotal(req.url))
+            
+            domain_age, vt_result = await asyncio.gather(domain_age_task, vt_task)
+            
+            vt_info = "미확인 (기록 없거나 대기열 초과)"
+            if vt_result:
+                if vt_result.get("status") == "VT_DANGER":
+                    vt_info = "위험 (기존 보안 엔진 블랙리스트에 이미 감지된 악성 도메인!)"
+                    # [Fast Pipeline] 외부 엔진 위험 판정 시 즉시 반환 (LLM 생략)
+                    early_data = json.dumps({"safety_score": 10, "reason": "전문 보안 엔진(VirusTotal) 블랙리스트에 이미 감지된 악성 사이트입니다. 절대 접속하지 마세요! (빠른 차단)"})
+                    # DB 캐시에 로그 저장
+                    log_analysis("hover", req.url, "10", "전문 보안 엔진(VirusTotal)에서 차단됨")
+                    yield json.dumps({"status": "success", "data": early_data}) + "\n"
+                    return
+                else:
+                    vt_info = "안전 (전문 보안 엔진 블랙리스트에 없음)"
+            
+            yield json.dumps({"progress": "AI(LLM)가 정보를 받아 처리 중... 🤖"}) + "\n"
+            
+            # 3. Gemini 프롬프트 구성 (대상자 맞춤형 및 안전도 점수 기준 명확화)
+            target_str = req.target_brand if req.target_brand else "없음"
+            is_https = "사용 중 (안전함)" if str(req.url).startswith("https://") else "미사용 - HTTP 기반의 암호화되지 않은 취약한 연결 (개인정보 탈취 위험 높음!)"
+            
+            prompt = f"""
+            당신은 보안 취약계층(어르신, 학생 등)을 돕는 친절한 화이트해커 전문가입니다.
+            '인증서 만료', 'XSS' 같은 어려운 기술 용어는 절대 쓰지 말고, 중학생도 이해할 수 있는 쉬운 비유와 일상어로 1~2문장으로 대답해야 합니다.
+            
+            대상 URL: {req.url}
+            
+            [사전 분석 메타데이터]
+            - HTTPS 통신 보안 프로토콜 사용 여부: {is_https}
+            - Levenshtein 타이포스쿼팅 탐지: {req.is_spoofed} (사칭 타겟: {target_str})
+            - 도메인 나이(RDAP): {domain_age}
+            - VirusTotal 보안 DB 감지 여부: {vt_info}
+            
+            위 메타데이터와 시스템 컨텍스트를 파악하여, 이 사이트의 안전도 점수(0~100)를 평가하세요.
+            100점은 '공식 사이트이며 완전히 안전함'을 뜻하고, 0점은 '심각한 사기/피싱 환경'을 의미합니다.
+            
+            응답은 반드시 아래 JSON 형식으로만 반환하세요:
+            {{"safety_score": 90, "reason": "이곳은 아이폰 공식 홈페이지입니다. 안심하고 쓰셔도 좋습니다."}}
+            """
+            
+            # 4. 모델 호출 (최신 google-genai 비동기 방식 및 정확한 모델명 복구)
+            if client is None:
+                yield json.dumps({"status": "error", "message": "Gemini API 키가 설정되지 않았습니다. 백엔드 서버의 환경 변수를 확인해주세요."}) + "\n"
+                return
+                
+            response = await client.aio.models.generate_content(
+                model='gemini-3.1-flash-lite-preview',
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                )
+            )
+            
+            # 5. DB에 결과 저장 (다음 번 호버링 속도 최적화를 위해)
+            try:
+                res_data = json.loads(response.text)
+                log_score = str(res_data.get("safety_score", 50))
+                log_reason = res_data.get("reason", "")
+                log_analysis("hover", req.url, log_score, log_reason)
+            except Exception as db_e:
+                print("DB 로그 저장 에러:", db_e)
+                
+            yield json.dumps({"status": "success", "data": response.text}) + "\n"
+        except Exception as e:
+            yield json.dumps({"status": "error", "message": str(e)}) + "\n"
+            
+    return StreamingResponse(event_generator(), media_type="application/x-ndjson")
 
 # 유저가 요청한 기존 DB 초기화(Clear) 엔드포인트 복구 적용
 @app.post("/api/clear-db")
@@ -229,90 +266,104 @@ async def clear_db():
 # 신규 RAG 연동 전용 드래그 텍스트 분석 엔드포인트
 @app.post("/api/v1/analyze/text")
 async def analyze_rag_text(req: TextAnalyzeRequest):
-    try:
-        # 1. RAG Context Retrieval (벡터 조회)
-        retrieved_context = ""
-        if rag_collection:
-            results = rag_collection.query(query_texts=[req.selected_text], n_results=3)
-            
-            if results and "documents" in results and len(results["documents"]) > 0 and len(results["documents"][0]) > 0:
-                docs = results["documents"][0]
-                metas = results["metadatas"][0]
-                distances = results.get("distances", [[999]])[0]
-                
-                if len(distances) > 0:
-                    print(f"[RAG] Vector Distance (Cache Hit Check): {distances[0]}")
-
-                # --- 🚀 [성능 최적화: LLM 고속 처리 우회 (Vector Cache Hit)] ---
-                # 만약 드래그한 문구 벡터가 데이터셋의 문구와 사실상 완벽하게 똑같다면 (거리 차이 0.15 미만)
-                # 느린 LLM(Gemini)에 물어볼 필요 없이 곧바로 데이터셋의 라벨을 토대로 빛의 속도로 초고속 반환합니다.
-                if len(distances) > 0 and distances[0] < 0.15:
-                    best_label = str(metas[0].get("label", "0"))
-                    if best_label == "2":
-                        return {"risk_level": "위험", "score": 95, "reason": "보안 데이터베이스의 악성 피싱 판례와 100% 일치하여, AI 딥러닝을 거치지 않고 초고속(0.01초)으로 차단했습니다.", "mitigation": "절대로 링크를 클릭하지 마세요."}
-                    elif best_label in ["1", "3"]:
-                        return {"risk_level": "안전", "score": 5, "reason": "보안 DB의 안전한 문구 판례와 100% 일치하여 AI 분석을 생략하고 초고속 통과시킵니다.", "mitigation": "안심하세요."}
-                    elif best_label in ["4", "5"]:
-                        return {"risk_level": "위험", "score": 85, "reason": "알려진 악성 스팸 메일 판례와 파일이 100% 동일합니다. 초고속 차단됨.", "mitigation": "링크를 클릭하지 말고 즉시 삭제하세요."}
-                # -----------------------------------------------------------------
-
-                context_pieces = []
-                for i, doc in enumerate(docs):
-                    label = metas[i].get("label", "unknown")
-                    source = metas[i].get("source", "unknown")
-                    context_pieces.append(f"[사례 {i+1} : 과거 라벨 {label} ({source})]\n> 내용: {doc}")
-                retrieved_context = "\n\n".join(context_pieces)
-        else:
-            retrieved_context = "(로컬 Vector DB가 오프라인입니다. 자체 지식망으로 판단하세요.)"
-
-        # 2. Gemini RAG Prompt Design
-        rag_prompt = f"""
-        당신은 개인용 보안 시스템의 코어 엔진 역할을 하는 RAG(검색 증강 생성) 기반 위협 분석 AI입니다.
-        사용자가 웹에서 의심스러워 드래그한 텍스트에 스미싱, 피싱, 악성 메일 유도 등 사회공학적 사기 의도가 있는지 분석하세요.
-
-        **[분석 대상 텍스트]**
-        "{req.selected_text}"
-
-        **[RAG 지식베이스 검색 결과: 유사 과거 판례 3건]**
-        {retrieved_context}
-        
-        (※ 참고: 판례 Label 디코딩: 1=일상대화/안전, 2=스미싱/피싱, 3=정상정보, 4=스팸 메일, 5=악성 바이러스 메일)
-
-        위의 RAG 판례 기록과 텍스트 문맥을 교차 대조하여, 대상 텍스트의 실질적 위협도를 종합 분석하세요.
-        분석 결과는 **0~100점**의 score로 표기해야 합니다.
-        - 점수 등급: 0~30점(안전), 31~70점(주의), 71~100점(위험)
-        
-        반드시 지정된 아래 JSON Schema(Pydantic 대응) 형식으로만 응답하세요:
-        {{"risk_level": "위험", "score": 95, "reason": "이 텍스트는 RAG 데이터베이스의 Label 2 판례와 문맥이 99% 일치하는 악성 택배 스미싱 수법입니다.", "mitigation": "절대로 링크를 클릭하지 말고 해당 발신자를 즉시 차단하세요."}}
-        """
-
-        # 3. Requesting JSON bounded structure directly from LLM
-        response = await client.aio.models.generate_content(
-            model='gemini-3.1-flash-lite-preview',
-            contents=rag_prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                safety_settings=[
-                    types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold=types.HarmBlockThreshold.BLOCK_NONE),
-                    types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HARASSMENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
-                    types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
-                    types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
-                ]
-            )
-        )
-        
-        import json
+    async def event_generator():
         try:
-            res_data = json.loads(response.text)
-            return res_data
-        except json.JSONDecodeError:
-            return {"risk_level": "에러", "score": 0, "reason": "AI 파싱 오류", "mitigation": "-"}
+            yield json.dumps({"progress": "RAG 지식베이스 검색 중... 🔍"}) + "\n"
             
-    except Exception as e:
-        error_msg = str(e)
-        if "503" in error_msg or "UNAVAILABLE" in error_msg:
-            return {"risk_level": "분석 지연", "score": 50, "reason": "현 시각 구글(Gemini) 본사 AI 서버 트래픽 폭주로 일시적 응답 불량(503)이 발생했습니다.", "mitigation": "구글 서버 지연 현상입니다. 1~2분 뒤 다시 드래그해 보세요."}
-        return {"risk_level": "시스템 오류", "score": 50, "reason": f"RAG 에러 발생: {error_msg}", "mitigation": "관리자 문의"}
+            # 1. RAG Context Retrieval (벡터 조회)
+            retrieved_context = ""
+            if rag_collection:
+                results = rag_collection.query(query_texts=[req.selected_text], n_results=3)
+                
+                if results and "documents" in results and len(results["documents"]) > 0 and len(results["documents"][0]) > 0:
+                    docs = results["documents"][0]
+                    metas = results["metadatas"][0]
+                    distances = results.get("distances", [[999]])[0]
+                    
+                    if len(distances) > 0:
+                        print(f"[RAG] Vector Distance (Cache Hit Check): {distances[0]}")
+
+                    # --- 🚀 [성능 최적화: LLM 고속 처리 우회 (Vector Cache Hit)] ---
+                    # 만약 드래그한 문구 벡터가 데이터셋의 문구와 사실상 완벽하게 똑같다면 (거리 차이 0.15 미만)
+                    # 느린 LLM(Gemini)에 물어볼 필요 없이 곧바로 데이터셋의 라벨을 토대로 빛의 속도로 초고속 반환합니다.
+                    if len(distances) > 0 and distances[0] < 0.15:
+                        best_label = str(metas[0].get("label", "0"))
+                        if best_label == "2":
+                            yield json.dumps({"risk_level": "위험", "score": 95, "reason": "보안 데이터베이스의 악성 피싱 판례와 100% 일치하여, AI 딥러닝을 거치지 않고 초고속(0.01초)으로 차단했습니다.", "mitigation": "절대로 링크를 클릭하지 마세요."}) + "\n"
+                            return
+                        elif best_label in ["1", "3"]:
+                            yield json.dumps({"risk_level": "안전", "score": 5, "reason": "보안 DB의 안전한 문구 판례와 100% 일치하여 AI 분석을 생략하고 초고속 통과시킵니다.", "mitigation": "안심하세요."}) + "\n"
+                            return
+                        elif best_label in ["4", "5"]:
+                            yield json.dumps({"risk_level": "위험", "score": 85, "reason": "알려진 악성 스팸 메일 판례와 파일이 100% 동일합니다. 초고속 차단됨.", "mitigation": "링크를 클릭하지 말고 즉시 삭제하세요."}) + "\n"
+                            return
+                    # -----------------------------------------------------------------
+
+                    context_pieces = []
+                    for i, doc in enumerate(docs):
+                        label = metas[i].get("label", "unknown")
+                        source = metas[i].get("source", "unknown")
+                        context_pieces.append(f"[사례 {i+1} : 과거 라벨 {label} ({source})]\n> 내용: {doc}")
+                    retrieved_context = "\n\n".join(context_pieces)
+            else:
+                retrieved_context = "(로컬 Vector DB가 오프라인입니다. 자체 지식망으로 판단하세요.)"
+
+            yield json.dumps({"progress": "AI(LLM)가 정보를 받아 처리 중... 🤖"}) + "\n"
+
+            # 2. Gemini RAG Prompt Design
+            rag_prompt = f"""
+            당신은 개인용 보안 시스템의 코어 엔진 역할을 하는 RAG(검색 증강 생성) 기반 위협 분석 AI입니다.
+            사용자가 웹에서 의심스러워 드래그한 텍스트에 스미싱, 피싱, 악성 메일 유도 등 사회공학적 사기 의도가 있는지 분석하세요.
+
+            **[분석 대상 텍스트]**
+            "{req.selected_text}"
+
+            **[RAG 지식베이스 검색 결과: 유사 과거 판례 3건]**
+            {retrieved_context}
+            
+            (※ 참고: 판례 Label 디코딩: 1=일상대화/안전, 2=스미싱/피싱, 3=정상정보, 4=스팸 메일, 5=악성 바이러스 메일)
+
+            위의 RAG 판례 기록과 텍스트 문맥을 교차 대조하여, 대상 텍스트의 실질적 위협도를 종합 분석하세요.
+            분석 결과는 **0~100점**의 score로 표기해야 합니다.
+            - 점수 등급: 0~30점(안전), 31~70점(주의), 71~100점(위험)
+            
+            반드시 지정된 아래 JSON Schema(Pydantic 대응) 형식으로만 응답하세요:
+            {{"risk_level": "위험", "score": 95, "reason": "이 텍스트는 RAG 데이터베이스의 Label 2 판례와 문맥이 99% 일치하는 악성 택배 스미싱 수법입니다.", "mitigation": "절대로 링크를 클릭하지 말고 해당 발신자를 즉시 차단하세요."}}
+            """
+
+            # 3. Requesting JSON bounded structure directly from LLM
+            if client is None:
+                yield json.dumps({"risk_level": "에러", "score": 50, "reason": "Gemini API 키가 설정되지 않았습니다.", "mitigation": "백엔드 서버 환경 변수를 확인하세요."}) + "\n"
+                return
+
+            response = await client.aio.models.generate_content(
+                model='gemini-3.1-flash-lite-preview',
+                contents=rag_prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    safety_settings=[
+                        types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+                        types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HARASSMENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+                        types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+                        types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+                    ]
+                )
+            )
+            
+            try:
+                res_data = json.loads(response.text)
+                yield json.dumps(res_data) + "\n"
+            except json.JSONDecodeError:
+                yield json.dumps({"risk_level": "에러", "score": 0, "reason": "AI 파싱 오류", "mitigation": "-"}) + "\n"
+                
+        except Exception as e:
+            error_msg = str(e)
+            if "503" in error_msg or "UNAVAILABLE" in error_msg:
+                yield json.dumps({"risk_level": "분석 지연", "score": 50, "reason": "현 시각 구글(Gemini) 본사 AI 서버 트래픽 폭주로 일시적 응답 불량(503)이 발생했습니다.", "mitigation": "구글 서버 지연 현상입니다. 1~2분 뒤 다시 드래그해 보세요."}) + "\n"
+            else:
+                yield json.dumps({"risk_level": "시스템 오류", "score": 50, "reason": f"RAG 에러 발생: {error_msg}", "mitigation": "관리자 문의"}) + "\n"
+
+    return StreamingResponse(event_generator(), media_type="application/x-ndjson")
 
 if __name__ == "__main__":
     import uvicorn

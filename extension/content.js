@@ -1,6 +1,18 @@
 // 보호 대상 탑티어 도메인들
 const topBrands = ["apple.com", "naver.com", "google.com", "amazon.com", "github.com", "facebook.com", "netflix.com"];
 
+// 진행사항 툴팁 표시 여부 상태 관리
+let showProgress = true;
+if (typeof chrome !== 'undefined' && chrome.storage) {
+    chrome.storage.local.get(['showProgress'], (result) => {
+        if (result.showProgress !== undefined) showProgress = result.showProgress;
+    });
+    chrome.storage.onChanged.addListener((changes) => {
+        if (changes.showProgress) showProgress = changes.showProgress.newValue;
+    });
+}
+
+
 // Levenshtein 거리 계산 알고리즘 (0.01초 소요)
 function calculateDistance(a, b) {
     if (!a) return b ? b.length : 0;
@@ -32,18 +44,18 @@ function checkLevenshtein(domain) {
         }
 
         for (const brand of topBrands) {
-            if (baseDomain === brand) return { spoofed: false, brand: null }; // 완벽 일치하면 공식 도메인
+            if (baseDomain === brand) return { spoofed: false, brand: brand, exact_match: true }; // 완벽 일치하면 공식 도메인
             
             const dist = calculateDistance(baseDomain, brand);
             // 타겟과 글자수 차이가 1~2글자이면서 불일치하면 오타 사칭(Typosquatting) 의심
             if (dist > 0 && dist <= 2) {
-                return { spoofed: true, brand: brand };
+                return { spoofed: true, brand: brand, exact_match: false };
             }
         }
-        return { spoofed: false, brand: null };
+        return { spoofed: false, brand: null, exact_match: false };
     } catch(err) {
         console.error("[Phishing Detector] Levenshtein 분석 중 오류:", err);
-        return { spoofed: false, brand: null };
+        return { spoofed: false, brand: null, exact_match: false };
     }
 }
 
@@ -99,7 +111,7 @@ document.addEventListener('mouseover', (e) => {
 
     console.log(`[Phishing Detector] 링크 호버 감지됨: ${url}`);
 
-    // 0.2초간 마우스가 머물면 의도(Hover)로 파악하고 즉시 검사 시작
+    // 0.5초간 마우스가 머물면 의도(Hover)로 파악하고 즉시 검사 시작
     hoverTimer = setTimeout(async () => {
         try {
             const domain = new URL(url).hostname;
@@ -117,7 +129,8 @@ document.addEventListener('mouseover', (e) => {
                 body: JSON.stringify({
                     url: url,
                     is_spoofed: brandData.spoofed,
-                    target_brand: brandData.brand
+                    target_brand: brandData.brand,
+                    is_exact_match: brandData.exact_match
                 })
             });
             
@@ -127,19 +140,45 @@ document.addEventListener('mouseover', (e) => {
                 throw new Error(`서버 에러 상태코드: ${response.status}`);
             }
 
-            const result = await response.json();
-            console.log(`[Phishing Detector] 백엔드 최종 결과 데이터:`, result);
-            
-            if (result.status === 'success') {
-                const data = JSON.parse(result.data);
-                showSafetyTooltip(e.pageX, e.pageY, data.safety_score, data.reason);
-            } else {
-                console.error("[Phishing Detector] 백엔드 분석 실패 원인:", result.message);
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                
+                buffer += decoder.decode(value, { stream: true });
+                const parts = buffer.split('\n');
+                buffer = parts.pop(); // 마지막 불완전한 조각 저장
+
+                for (const part of parts) {
+                    if (!part.trim()) continue;
+                    try {
+                        const result = JSON.parse(part);
+                        
+                        if (result.progress) {
+                            if (showProgress) {
+                                showSafetyTooltip(e.pageX, e.pageY, 50, result.progress);
+                                if (currentTooltip) currentTooltip.classList.remove('safe', 'danger', 'warning');
+                            }
+                        } else if (result.status === 'success') {
+                            const data = JSON.parse(result.data);
+                            showSafetyTooltip(e.pageX, e.pageY, data.safety_score, data.reason);
+                        } else if (result.status === 'error') {
+                            console.error("[Phishing Detector] 백엔드 분석 실패 원인:", result.message);
+                            showSafetyTooltip(e.pageX, e.pageY, 50, `분석 실패: ${result.message}`);
+                        }
+                    } catch (parseError) {
+                        console.error("NDJSON 파싱 에러:", parseError, part);
+                    }
+                }
             }
         } catch (err) {
             console.error('[Phishing Detector] API 연결 또는 파싱 에러 (서버 켜져있나요?)', err);
+            showSafetyTooltip(e.pageX, e.pageY, 50, "서버와 통신할 수 없습니다. 서버가 켜져있는지 확인해주세요.");
         }
-    }, 200); 
+    }, 500); 
 });
 
 document.addEventListener('mouseout', (e) => {
@@ -175,8 +214,10 @@ document.addEventListener('mouseup', async (e) => {
         
         try {
             // 임시 툴팁 생성
-            showSafetyTooltip(e.pageX, e.pageY, 50, "드래그한 문맥의 악의성을 AI가 분석 중입니다... 🔄");
-            if(currentTooltip) currentTooltip.classList.remove('safe', 'danger', 'warning');
+            if (showProgress) {
+                showSafetyTooltip(e.pageX, e.pageY, 50, "분석 서버 연결 중... 🔄");
+                if (currentTooltip) currentTooltip.classList.remove('safe', 'danger', 'warning');
+            }
             
             const response = await fetch('http://localhost:8000/api/v1/analyze/text', {
                 method: 'POST',
@@ -188,17 +229,44 @@ document.addEventListener('mouseup', async (e) => {
             
             if (!response.ok) throw new Error("서버 연동 에러");
             
-            // RAG 서버는 { risk_level, score, reason, mitigation } 포맷을 반환 (스코어 100점이 위험)
-            const result = await response.json();
-            if (result && result.score !== undefined) {
-                // UI는 100점이 '안전'이므로 점수를 뒤집어서 전달 (100 - score)
-                const safetyScore = 100 - result.score;
-                showSafetyTooltip(e.pageX, e.pageY, safetyScore, result.reason + "<br>🛡️ 제안: " + (result.mitigation || ""));
-            } else {
-                console.error("[Phishing Detector] 드래그 에러:", result);
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                
+                buffer += decoder.decode(value, { stream: true });
+                const parts = buffer.split('\n');
+                buffer = parts.pop();
+
+                for (const part of parts) {
+                    if (!part.trim()) continue;
+                    try {
+                        const result = JSON.parse(part);
+                        
+                        if (result.progress) {
+                            if (showProgress) {
+                                showSafetyTooltip(e.pageX, e.pageY, 50, result.progress);
+                                if (currentTooltip) currentTooltip.classList.remove('safe', 'danger', 'warning');
+                            }
+                        } else if (result && result.score !== undefined) {
+                            // UI는 100점이 '안전'이므로 점수를 뒤집어서 전달 (100 - score)
+                            const safetyScore = 100 - result.score;
+                            showSafetyTooltip(e.pageX, e.pageY, safetyScore, result.reason + "<br>🛡️ 제안: " + (result.mitigation || ""));
+                        } else if (result.risk_level === "에러" || result.risk_level === "시스템 오류") {
+                            console.error("[Phishing Detector] 드래그 분석 에러:", result);
+                            showSafetyTooltip(e.pageX, e.pageY, 50, `분석 에러: ${result.reason}`);
+                        }
+                    } catch (parseError) {
+                        console.error("NDJSON 파싱 에러:", parseError, part);
+                    }
+                }
             }
         } catch (err) {
             console.error('[Phishing Detector] 드래그 분석 API 연동 실패', err);
+            showSafetyTooltip(e.pageX, e.pageY, 50, "서버와 통신할 수 없습니다. (API 연동 실패)");
         }
     }
 });
